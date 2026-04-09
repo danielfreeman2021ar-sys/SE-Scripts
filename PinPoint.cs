@@ -8,7 +8,7 @@ KP_MIN = 1.0, KP_MAX = 6.0, KD_NEAR = 0.55, KD_FAR = 0.22, KP_FULL_FACE_ANGLE_DE
 KP_DEADZONE_ANGLE_DEG = 1.0, KP_EXP_RAMP_ANGLE_DEG = 5.0, KP_EXPONENT = 6.0, MAX_RATE = 3.0, TARGET_MEMORY_SEC = 6.0, MAX_TARGET_ACCEL_MPS2 = 50.0, ACCEL_FILTER = 0.25;
 const double CENTER_VIEW_WEIGHT = 1200.0, CENTER_VIEW_EXPONENT = 4.0;
 const double PREVIEW_PERSIST_SEC = 1.5, DIRECT_AHEAD_HALF_ANGLE_DEG = 2.0, DIRECT_AHEAD_STRONG_BONUS = 2500.0;
-const int SCAN_RING_COUNT = 2, SCAN_POINTS_PER_RING = 8, LOCK_MICROCONE_POINTS = 9, CONFIRM_MAX_CAMERA_ATTEMPTS = 2, ACCEL_SOLVE_ITERS = 6, CONFIRM_TICK_INTERVAL = 6, UI_TICK_INTERVAL = 30, VOXEL_SCAN_COOLDOWN_TICKS = 30, LOST_MAX_CONSECUTIVE_MISSES = 40;
+const int SCAN_RING_COUNT = 2, SCAN_POINTS_PER_RING = 8, LOCK_MICROCONE_POINTS = 9, CONFIRM_MAX_CAMERA_ATTEMPTS = 2, ACCEL_SOLVE_ITERS = 6, CONFIRM_TICK_INTERVAL = 6, UI_TICK_INTERVAL = 30, VOXEL_SCAN_COOLDOWN_TICKS = 30, ACQUIRE_VOXEL_SCAN_COOLDOWN_TICKS = 30, ACQUIRE_MAX_RAYCASTS_PER_PASS = 8, LOST_MAX_CONSECUTIVE_MISSES = 40;
 const int DIRECT_AHEAD_CENTER_ATTEMPTS = 6;
 const uint UNLOCK_SUPPRESS_TICKS = 120;
 uint _supprTick = 0;
@@ -77,6 +77,7 @@ CameraScanScheduler _camScheduler;
 uint _tick, _nextConfirmTick, _nextUiTick;
 bool _lcdConfigured;
 uint _confirmBlockedUntilTick;
+uint _acquireBlockedUntilTick;
 int _turretRrIndex;
 double _nextCtrlRefreshAt;
 void InitPinpoint()
@@ -86,6 +87,7 @@ void InitPinpoint()
     _nextUiTick = 0;
     _lcdConfigured = false;
     _confirmBlockedUntilTick = 0;
+    _acquireBlockedUntilTick = 0;
     _allCamsScratch.Clear();
     GridTerminalSystem.GetBlocksOfType(_allCamsScratch, c => c != null && c.IsSameConstructAs(Me));
     _cams.Clear();
@@ -337,39 +339,56 @@ bool TryAcquireBestTarget(out long bestEntity, out Vector3D bestPos, out Vector3
     bestEntity = 0;
     bestPos = Vector3D.Zero;
     bestVel = Vector3D.Zero;
-    if (_tick < _supprTick) return false;
+    if (_tick < _supprTick || _tick < _acquireBlockedUntilTick) return false;
     if (TryAcquireTurretTarget(out bestEntity, out bestPos, out bestVel))
         return true;
     if (_cams.Count == 0) return false;
     double bestAcquireScore = -1.0;
+    int raycastsUsed = 0;
+    bool voxelObstructed = false;
     int centerAttempts = DIRECT_AHEAD_CENTER_ATTEMPTS;
     int maxCenterAttempts = _cams.Count * 2;
     if (centerAttempts > maxCenterAttempts) centerAttempts = maxCenterAttempts;
     for (int i = 0; i < centerAttempts; i++)
     {
+        if (raycastsUsed >= ACQUIRE_MAX_RAYCASTS_PER_PASS) break;
         int camIdx;
         var cam = _camScheduler.PickCameraThatCanScan(MANUAL_LOCK_DISTANCE_M, out camIdx);
         if (cam == null) break;
         var info = cam.Raycast(MANUAL_LOCK_DISTANCE_M, 0f, 0f);
+        raycastsUsed++;
+        if (info.Type == MyDetectedEntityType.Asteroid || info.Type == MyDetectedEntityType.Planet)
+        {
+            voxelObstructed = true;
+            break;
+        }
         Vector3D center;
         if (!TryUpdateBestAcquireCandidate(ref info, ref bestAcquireScore, ref bestEntity, ref bestPos, ref bestVel, out center))
             continue;
         if (ComputeForwardDot(center) >= Math.Cos(0.75 * Math.PI / 180.0))
             return true;
     }
-    for (int i = 0; i < _acquirePattern.Count; i++)
+    for (int i = 0; i < _acquirePattern.Count && raycastsUsed < ACQUIRE_MAX_RAYCASTS_PER_PASS; i++)
     {
         int camIdx;
         var cam = _camScheduler.PickCameraThatCanScan(MANUAL_LOCK_DISTANCE_M, out camIdx);
         if (cam == null) break;
         var ray = _acquirePattern[i];
         var info = cam.Raycast(MANUAL_LOCK_DISTANCE_M, ray.PitchDeg, ray.YawDeg);
+        raycastsUsed++;
+        if (info.Type == MyDetectedEntityType.Asteroid || info.Type == MyDetectedEntityType.Planet)
+        {
+            voxelObstructed = true;
+            break;
+        }
         Vector3D center;
         if (!TryUpdateBestAcquireCandidate(ref info, ref bestAcquireScore, ref bestEntity, ref bestPos, ref bestVel, out center))
             continue;
         if (IsStrongAcquireCandidate(ref info) && ComputeForwardDot(center) >= Math.Cos(DIRECT_AHEAD_HALF_ANGLE_DEG * Math.PI / 180.0))
             break;
     }
+    if (bestEntity == 0 && voxelObstructed)
+        _acquireBlockedUntilTick = _tick + (uint)AdaptiveIntervalTicks(ACQUIRE_VOXEL_SCAN_COOLDOWN_TICKS);
     return bestEntity != 0;
 }
 bool TryAcquireTurretTarget(out long bestEntity, out Vector3D bestPos, out Vector3D bestVel)
@@ -1104,8 +1123,9 @@ bool TryProjectWorldToSurface(IMyCameraBlock cam, IMyTextSurface s, Vector3D wor
     if (fromCam.LengthSquared() < 1e-12) return false;
 
     Vector3D local = Vector3D.TransformNormal(fromCam, MatrixD.Transpose(wm));
-
-    if (local.Z <= 0) return false;
+    // In Space Engineers local "forward" is -Z, so depth is the negated Z axis.
+    double depth = -local.Z;
+    if (depth <= 1e-6) return false;
 
     var surfSize = s.SurfaceSize;
     var offset = (s.TextureSize - surfSize) * 0.5f;
@@ -1115,8 +1135,8 @@ bool TryProjectWorldToSurface(IMyCameraBlock cam, IMyTextSurface s, Vector3D wor
     double tanY = Math.Tan(fovY * 0.5);
     double tanX = tanY * aspect;
 
-    double xN = (local.X / local.Z) / tanX;
-    double yN = (local.Y / local.Z) / tanY;
+    double xN = (local.X / depth) / tanX;
+    double yN = (local.Y / depth) / tanY;
 
     if (Math.Abs(xN) > 1.0 || Math.Abs(yN) > 1.0) return false;
 
