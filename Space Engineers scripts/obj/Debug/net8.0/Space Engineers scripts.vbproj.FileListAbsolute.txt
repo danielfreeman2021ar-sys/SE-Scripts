@@ -1,0 +1,14 @@
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\bin\Debug\net8.0\Space Engineers scripts.exe
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\bin\Debug\net8.0\Space Engineers scripts.deps.json
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\bin\Debug\net8.0\Space Engineers scripts.runtimeconfig.json
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\bin\Debug\net8.0\Space Engineers scripts.dll
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\bin\Debug\net8.0\Space Engineers scripts.pdb
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.AssemblyInfoInputs.cache
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.AssemblyInfo.vb
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.vbproj.CoreCompileInputs.cache
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.dll
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\refint\Space Engineers scripts.dll
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.pdb
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\Space Engineers scripts.genruntimeconfig.cache
+C:\Users\Danpc\source\repos\Space Engineers scripts\Space Engineers scripts\obj\Debug\net8.0\ref\Space Engineers scripts.dll

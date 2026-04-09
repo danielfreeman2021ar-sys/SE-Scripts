@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "Space Engineers scripts/1.0.0": {
+        "runtime": {
+          "Space Engineers scripts.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Space Engineers scripts/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
