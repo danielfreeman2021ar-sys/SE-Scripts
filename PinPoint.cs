@@ -550,20 +550,13 @@ bool ProcessLockedTurrets()
 void TryManualLock()
 {
     if (_tick < _supprTick) return;
-    if (_previewValid && _previewEntityId != 0 && _elapsedSec <= _previewExpireAt)
-    {
-        SetLockFromSolution(_previewEntityId, _previewPos, _previewVel);
-        ClearPreviewCandidate();
+    if (_locked) return;
+    if (!_previewValid || _previewEntityId == 0 || _elapsedSec > _previewExpireAt)
+        UpdatePreviewTarget();
+    if (!_previewValid || _previewEntityId == 0 || _elapsedSec > _previewExpireAt)
         return;
-    }
-    long bestEntity;
-    Vector3D bestPos;
-    Vector3D bestVel;
-    if (TryAcquireBestTarget(out bestEntity, out bestPos, out bestVel))
-    {
-        SetLockFromSolution(bestEntity, bestPos, bestVel);
-        ClearPreviewCandidate();
-    }
+    SetLockFromSolution(_previewEntityId, _previewPos, _previewVel);
+    ClearPreviewCandidate();
 }
 void TrackLead()
 {
@@ -595,10 +588,7 @@ void TrackLead()
             }
         }
         if (_consecutiveMisses >= LOST_MAX_CONSECUTIVE_MISSES)
-        {
-            DropLock();
-            return;
-        }
+            _consecutiveMisses = LOST_MAX_CONSECUTIVE_MISSES;
     }
     Vector3D shooterVel = _ctrl.GetShipVelocities().LinearVelocity, origin = GetAimOriginWorld();
     Vector3D dirWorld = SolveLead(origin, _tPos, _tVel, _tAcc, shooterVel, _projectileSpeedMps);
