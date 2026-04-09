@@ -551,7 +551,8 @@ void TryManualLock()
 {
     if (_tick < _supprTick) return;
     if (_locked) return;
-    UpdatePreviewTarget();
+    if (!_previewValid || _previewEntityId == 0 || _elapsedSec > _previewExpireAt)
+        UpdatePreviewTarget();
     if (!_previewValid || _previewEntityId == 0 || _elapsedSec > _previewExpireAt)
         return;
     SetLockFromSolution(_previewEntityId, _previewPos, _previewVel);
