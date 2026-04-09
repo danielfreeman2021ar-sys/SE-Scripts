@@ -339,9 +339,10 @@ bool TryAcquireBestTarget(out long bestEntity, out Vector3D bestPos, out Vector3
     bestEntity = 0;
     bestPos = Vector3D.Zero;
     bestVel = Vector3D.Zero;
-    if (_tick < _supprTick || _tick < _acquireBlockedUntilTick) return false;
+    if (_tick < _supprTick) return false;
     if (TryAcquireTurretTarget(out bestEntity, out bestPos, out bestVel))
         return true;
+    if (_tick < _acquireBlockedUntilTick) return false;
     if (_cams.Count == 0) return false;
     double bestAcquireScore = -1.0;
     int raycastsUsed = 0;
