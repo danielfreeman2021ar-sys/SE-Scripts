@@ -12,7 +12,7 @@ const int SCAN_RING_COUNT = 2, SCAN_POINTS_PER_RING = 8, LOCK_MICROCONE_POINTS =
 const int DIRECT_AHEAD_CENTER_ATTEMPTS = 6;
 const int TURRET_FOCUS_INTERVAL_TICKS = 12;
 const int BURST_SHOTS_SHORT = 1, BURST_SHOTS_MEDIUM = 2, BURST_SHOTS_LONG = 4;
-const double BURST_SHORT_ANGLE_DEG = 2.0, BURST_MEDIUM_ANGLE_DEG = 0.7;
+const double TURRET_FOCUS_WIDE_ANGLE_DEG = 2.0, TURRET_FOCUS_MEDIUM_ANGLE_DEG = 0.7;
 const uint UNLOCK_SUPPRESS_TICKS = 120;
 uint _supprTick = 0;
 const int TURRET_RR_BATCH_PER_TICK = 10;
@@ -576,7 +576,7 @@ void TrackLead()
     }
     if (_tick >= _nextTurretFocusTick)
     {
-        _nextTurretFocusTick = _tick + (uint)AdaptiveIntervalTicks(TURRET_FOCUS_INTERVAL_TICKS);
+        _nextTurretFocusTick = _tick + (uint)AdaptiveIntervalTicks(GetTurretFocusIntervalTicks());
         TryForceTurretsTrackLockedTarget();
     }
     PredictTarget();
@@ -644,11 +644,15 @@ double ComputeAimErrorAngleDeg(Vector3D targetPos)
 }
 int GetAdaptiveBurstFollowupShots()
 {
-    if (!_locked || _targetEntityId == 0) return BURST_SHOTS_SHORT;
+    return BURST_SHOTS_SHORT;
+}
+int GetTurretFocusIntervalTicks()
+{
+    if (!_locked || _targetEntityId == 0) return TURRET_FOCUS_INTERVAL_TICKS;
     double errDeg = ComputeAimErrorAngleDeg(_tPos);
-    if (errDeg >= BURST_SHORT_ANGLE_DEG) return BURST_SHOTS_SHORT;
-    if (errDeg >= BURST_MEDIUM_ANGLE_DEG) return BURST_SHOTS_MEDIUM;
-    return BURST_SHOTS_LONG;
+    if (errDeg >= TURRET_FOCUS_WIDE_ANGLE_DEG) return 1;
+    if (errDeg >= TURRET_FOCUS_MEDIUM_ANGLE_DEG) return Math.Max(1, TURRET_FOCUS_INTERVAL_TICKS / 2);
+    return TURRET_FOCUS_INTERVAL_TICKS;
 }
 void TryForceTurretsTrackLockedTarget()
 {
