@@ -129,6 +129,7 @@ int pullSourceIndex = 0;
 int pullItemIndex = 0;
 int runCounter = 0;
 bool initialToolPlanBuilt = false;
+bool runtimeBootstrapped = false;
 
 public Program()
 {
@@ -137,10 +138,13 @@ public Program()
     UpdateItemTotals();
     UpdateQueuedTotals();
     BuildInitialToolPlan();
+    runtimeBootstrapped = true;
 }
 
 public void Main(string argument, UpdateType updateSource)
 {
+    EnsureRuntimeStarted();
+
     if (argument == "refresh")
     {
         RefreshBlocks();
@@ -175,6 +179,25 @@ public void Main(string argument, UpdateType updateSource)
 
     EchoStatus();
     runCounter++;
+}
+
+void EnsureRuntimeStarted()
+{
+    if ((Runtime.UpdateFrequency & UpdateFrequency.Update100) == 0)
+    {
+        Runtime.UpdateFrequency |= UpdateFrequency.Update100;
+    }
+
+    if (runtimeBootstrapped)
+    {
+        return;
+    }
+
+    RefreshBlocks();
+    UpdateItemTotals();
+    UpdateQueuedTotals();
+    BuildInitialToolPlan();
+    runtimeBootstrapped = true;
 }
 
 void RefreshBlocks()
