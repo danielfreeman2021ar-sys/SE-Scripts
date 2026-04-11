@@ -1057,7 +1057,7 @@ void RunComponentAutocrafting()
             continue;
         }
 
-        double toQueue = Math.Min(missing, MaxQueuePerComponentPerCheck);
+        double toQueue = missing;
         var blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + GetComponentBlueprintSubtype(subtype));
 
         QueueBlueprint(blueprint, toQueue);
@@ -1256,7 +1256,7 @@ bool QueueBlueprint(MyDefinitionId blueprint, double amount)
         return false;
     }
 
-    double each = Math.Ceiling(amount / availableCount);
+    double each = amount / availableCount;
 
     for (int i = 0; i < assemblers.Count; i++)
     {
