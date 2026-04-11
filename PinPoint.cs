@@ -10,6 +10,9 @@ const double CENTER_VIEW_WEIGHT = 1200.0, CENTER_VIEW_EXPONENT = 4.0;
 const double PREVIEW_PERSIST_SEC = 1.5, DIRECT_AHEAD_HALF_ANGLE_DEG = 2.0, DIRECT_AHEAD_STRONG_BONUS = 2500.0;
 const int SCAN_RING_COUNT = 2, SCAN_POINTS_PER_RING = 8, LOCK_MICROCONE_POINTS = 9, CONFIRM_MAX_CAMERA_ATTEMPTS = 2, ACCEL_SOLVE_ITERS = 6, CONFIRM_TICK_INTERVAL = 6, UI_TICK_INTERVAL = 30, VOXEL_SCAN_COOLDOWN_TICKS = 30, ACQUIRE_VOXEL_SCAN_COOLDOWN_TICKS = 30, ACQUIRE_MAX_RAYCASTS_PER_PASS = 8, LOST_MAX_CONSECUTIVE_MISSES = 40;
 const int DIRECT_AHEAD_CENTER_ATTEMPTS = 6;
+const int TURRET_FOCUS_INTERVAL_TICKS = 12;
+const int BURST_SHOTS_SHORT = 1, BURST_SHOTS_MEDIUM = 2, BURST_SHOTS_LONG = 4;
+const double BURST_SHORT_ANGLE_DEG = 2.0, BURST_MEDIUM_ANGLE_DEG = 0.7;
 const uint UNLOCK_SUPPRESS_TICKS = 120;
 uint _supprTick = 0;
 const int TURRET_RR_BATCH_PER_TICK = 10;
@@ -41,6 +44,7 @@ double _currentAimKp = 0.0;
 uint _nextTurretProcessTick;
 double _projectileSpeedMps = PROJECTILE_SPEED_MPS;
 double _simSpeedRatio = 1.0;
+uint _nextTurretFocusTick;
 struct ScanRay { public float PitchDeg, YawDeg; public ScanRay(float p, float y) { PitchDeg = p; YawDeg = y; } }
 bool _previewValid = false;
 Vector3D _previewPos = Vector3D.Zero;
@@ -150,6 +154,7 @@ void InitPinpoint()
     _nextCtrlRefreshAt = 0.0;
     _projectileSpeedMps = DetectAimProjectileSpeed();
     _simSpeedRatio = 1.0;
+    _nextTurretFocusTick = 0;
     ConfigureLcdSurfacesOnce();
     ClearGyros();
 }
@@ -469,6 +474,8 @@ void SetLockFromSolution(long entityId, Vector3D pos, Vector3D vel)
     _lastSeen = _elapsedSec;
     _lockIndex = 0;
     _consecutiveMisses = 0;
+    _nextTurretFocusTick = 0;
+    TryForceTurretsTrackLockedTarget();
 }
 bool IsEnemyLargeGrid(ref MyDetectedEntityInfo info)
 {
@@ -560,7 +567,6 @@ void TryManualLock()
 }
 void TrackLead()
 {
-    PredictTarget();
     bool turretUpdated = false;
     if (_tick >= _nextTurretProcessTick)
     {
@@ -568,7 +574,13 @@ void TrackLead()
         turretUpdated = ProcessLockedTurrets();
         if (turretUpdated) _consecutiveMisses = 0;
     }
-    bool doConfirm = _tick >= _nextConfirmTick && _tick >= _confirmBlockedUntilTick;
+    if (_tick >= _nextTurretFocusTick)
+    {
+        _nextTurretFocusTick = _tick + (uint)AdaptiveIntervalTicks(TURRET_FOCUS_INTERVAL_TICKS);
+        TryForceTurretsTrackLockedTarget();
+    }
+    PredictTarget();
+    bool doConfirm = !turretUpdated && _tick >= _nextConfirmTick && _tick >= _confirmBlockedUntilTick;
     if (doConfirm) _nextConfirmTick = _tick + (uint)AdaptiveIntervalTicks(CONFIRM_TICK_INTERVAL);
     if (doConfirm)
     {
@@ -617,6 +629,36 @@ void ClearAllTargetingData()
     _prevAimPitch = 0.0;
     _prevAimYaw = 0.0;
     _currentAimKp = 0.0;
+    _nextTurretFocusTick = 0;
+}
+double ComputeAimErrorAngleDeg(Vector3D targetPos)
+{
+    var refBlock = GetAimReferenceBlock();
+    if (refBlock == null) return 180.0;
+    Vector3D toTarget = targetPos - refBlock.GetPosition();
+    double len2 = toTarget.LengthSquared();
+    if (len2 < 1e-12) return 0.0;
+    Vector3D dir = Vector3D.Normalize(toTarget);
+    double dot = Clamp(Vector3D.Dot(refBlock.WorldMatrix.Forward, dir), -1.0, 1.0);
+    return Math.Acos(dot) * 180.0 / Math.PI;
+}
+int GetAdaptiveBurstFollowupShots()
+{
+    if (!_locked || _targetEntityId == 0) return BURST_SHOTS_SHORT;
+    double errDeg = ComputeAimErrorAngleDeg(_tPos);
+    if (errDeg >= BURST_SHORT_ANGLE_DEG) return BURST_SHOTS_SHORT;
+    if (errDeg >= BURST_MEDIUM_ANGLE_DEG) return BURST_SHOTS_MEDIUM;
+    return BURST_SHOTS_LONG;
+}
+void TryForceTurretsTrackLockedTarget()
+{
+    if (!_locked || _targetEntityId == 0) return;
+    for (int i = 0; i < _turrets.Count; i++)
+    {
+        var t = _turrets[i];
+        if (t == null || t.Closed || !t.IsFunctional) continue;
+        t.TrackTarget(_tPos, _tVel);
+    }
 }
 bool ConfirmLock(double distance, out RaycastResultKind kind)
 {
@@ -2153,12 +2195,14 @@ class SalvoGroup
     readonly Dictionary<long, bool> _waitingForRechargeStart = new Dictionary<long, bool>();
     readonly Dictionary<long, bool> _lastIsShooting = new Dictionary<long, bool>();
     readonly HashSet<long> _ignoreShotEdge = new HashSet<long>();
+    readonly Program _p;
     static readonly MyDefinitionId E = new MyDefinitionId(typeof(MyObjectBuilder_GasProperties), "Electricity");
     const float IdlePowerDraw = 0.0002f;
     const float Epsilon = 1e-6f;
     public SalvoGroup(IMyBlockGroup b, Program p)
     {
         B = b;
+        _p = p;
         Refresh(p);
     }
     public void CycleMode()
@@ -2355,7 +2399,9 @@ class SalvoGroup
         if (!manualShot) return;
         if (Mode == SalvoMode.Burst)
         {
-            _burstShotsRemaining = Math.Max(0, ReadyOtherGunCount(g.EntityId));
+            int maxFollowups = _p != null ? _p.GetAdaptiveBurstFollowupShots() : BURST_SHOTS_SHORT;
+            int ready = ReadyOtherGunCount(g.EntityId);
+            _burstShotsRemaining = Math.Max(0, Math.Min(ready, maxFollowups));
             _burstTimer = 0;
             _burstPendingShot = false;
         }
