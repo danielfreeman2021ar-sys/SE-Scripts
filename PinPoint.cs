@@ -2111,393 +2111,318 @@ class Missile
 }
 #endregion#region HUD
 #region SalvoModes
-const int _salvoRefreshTicks = 30;
+const string SALVO_TAG = "[Salvo]";
+const int SALVO_REFRESH_TICKS = 180;
+const int SALVO_SINGLE_INTERVAL_TICKS = 20;
+const int SALVO_BURST_DELAY_TICKS = 6;
+const int SALVO_TRIGGER_IGNORE_TICKS = 8;
+const float SALVO_IDLE_POWER_DRAW = 0.0002f;
+const float SALVO_EPSILON = 1e-6f;
 uint _salvoNextRefreshTick;
-readonly List<IMyBlockGroup> _salvoBG = new List<IMyBlockGroup>();
-readonly List<SalvoGroup> _salvos = new List<SalvoGroup>();
+readonly List<IMyUserControllableGun> _salvoWeapons = new List<IMyUserControllableGun>();
+readonly List<IMyUserControllableGun> _salvoRailguns = new List<IMyUserControllableGun>();
+readonly Dictionary<long, bool> _salvoRailWaitingForRechargeStart = new Dictionary<long, bool>();
+readonly Dictionary<long, bool> _salvoRailLastIsShooting = new Dictionary<long, bool>();
+readonly Dictionary<long, int> _salvoRailTriggerIgnore = new Dictionary<long, int>();
+static readonly MyDefinitionId _salvoElectricityId = new MyDefinitionId(typeof(MyObjectBuilder_GasProperties), "Electricity");
+int _salvoRailIndex;
+int _salvoRailTicksSinceLast;
+bool _salvoRailReady;
+bool _salvoBurstPending;
+int _salvoBurstTicks;
+
 enum SalvoMode
 {
-    Manual,
-    Burst
+    RailgunSingle = 0,
+    RailgunBurst = 1
 }
+
+SalvoMode _salvoMode = SalvoMode.RailgunSingle;
+SalvoMode _salvoPendingBurstMode = SalvoMode.RailgunSingle;
+
 void InitSalvo()
 {
     _salvoNextRefreshTick = 0;
+    _salvoRailIndex = 0;
+    _salvoRailTicksSinceLast = SALVO_SINGLE_INTERVAL_TICKS;
+    _salvoRailReady = true;
+    _salvoBurstPending = false;
+    _salvoBurstTicks = 0;
+    _salvoMode = SalvoMode.RailgunSingle;
+    _salvoPendingBurstMode = _salvoMode;
     SalvoRefresh();
 }
 void SalvoTick(string argument, UpdateType updateSource)
 {
     if (_tick >= _salvoNextRefreshTick)
     {
-        _salvoNextRefreshTick = _tick + (uint)_salvoRefreshTicks;
+        _salvoNextRefreshTick = _tick + (uint)SALVO_REFRESH_TICKS;
         SalvoRefresh();
     }
+
     if ((updateSource & (UpdateType.Terminal | UpdateType.Trigger | UpdateType.Script)) != 0 && !string.IsNullOrWhiteSpace(argument))
-    {
-        var a = argument.Trim();
-        if (a.Equals("Salvo", StringComparison.OrdinalIgnoreCase))
-            SalvoCycleMode();
-    }
-    for (int i = 0; i < _salvos.Count; i++)
-        _salvos[i].Update();
+        HandleSalvoArgument(argument.Trim());
+
+    TickSalvoRailTriggerIgnore();
+
+    bool railgunTrigger = UpdateRailgunCycleAndDetectTrigger();
+
+    if (railgunTrigger)
+        HandleSalvoTriggerFromRailgun();
+
+    ProcessPendingSalvoBurst();
 }
-void SalvoRefresh()
+void HandleSalvoArgument(string a)
 {
-    _salvoBG.Clear();
-    GridTerminalSystem.GetBlockGroups(_salvoBG, g =>
-        g != null && g.Name != null && g.Name.IndexOf(AIM_TAG, StringComparison.OrdinalIgnoreCase) >= 0);
-    _salvos.RemoveAll(x => x.B == null || !_salvoBG.Contains(x.B));
-    for (int i = 0; i < _salvos.Count; i++)
-        _salvos[i].Refresh(this);
-    for (int i = 0; i < _salvoBG.Count; i++)
-    {
-        var g = _salvoBG[i];
-        bool found = false;
-        for (int j = 0; j < _salvos.Count; j++)
-        {
-            if (_salvos[j].B == g)
-            {
-                found = true;
-                break;
-            }
-        }
-        if (!found)
-            _salvos.Add(new SalvoGroup(g, this));
-    }
+    if (a.Equals("salvo", StringComparison.OrdinalIgnoreCase))
+        CycleSalvoMode();
 }
-void SalvoCycleMode()
+void CycleSalvoMode()
 {
-    for (int i = 0; i < _salvos.Count; i++)
-        _salvos[i].CycleMode();
+    _salvoMode = (SalvoMode)(((int)_salvoMode + 1) % 2);
+    _salvoPendingBurstMode = _salvoMode;
+    _salvoBurstPending = false;
+    _salvoBurstTicks = 0;
 }
 string GetSalvoModeLabel()
 {
-    if (_salvos.Count == 0) return "Railgun Manual";
-    bool anyBurst = false;
-    bool anyManual = false;
-    for (int i = 0; i < _salvos.Count; i++)
+    switch (_salvoMode)
     {
-        if (_salvos[i].Mode == SalvoMode.Burst) anyBurst = true;
-        else anyManual = true;
+        case SalvoMode.RailgunSingle: return "Railgun Single";
+        case SalvoMode.RailgunBurst: return "Railgun Burst";
     }
-    if (anyBurst && anyManual) return "Railgun Mixed";
-    return anyBurst ? "Railgun Burst" : "Railgun Manual";
+    return "Railgun Single";
 }
-class SalvoGroup
+bool IsLargeGridRailgun(IMyUserControllableGun g)
 {
-    public IMyBlockGroup B { get; private set; }
-    public SalvoMode Mode = SalvoMode.Manual;
-    int _i = 0;
-    int _ticksSinceLast = 0;
-    bool _ready = true;
-    int _burstShotsRemaining = 0;
-    int _burstTimer = 0;
-    bool _burstPendingShot = false;
-    const int ManualSpacingTicks = 20;
-    const int BurstSpacingTicks = 6;
-    readonly List<IMyUserControllableGun> _rg = new List<IMyUserControllableGun>();
-    readonly Dictionary<long, bool> _waitingForRechargeStart = new Dictionary<long, bool>();
-    readonly Dictionary<long, bool> _lastIsShooting = new Dictionary<long, bool>();
-    readonly HashSet<long> _ignoreShotEdge = new HashSet<long>();
-    readonly Program _p;
-    static readonly MyDefinitionId E = new MyDefinitionId(typeof(MyObjectBuilder_GasProperties), "Electricity");
-    const float IdlePowerDraw = 0.0002f;
-    const float Epsilon = 1e-6f;
-    public SalvoGroup(IMyBlockGroup b, Program p)
+    if (g == null) return false;
+    return g.BlockDefinition.SubtypeId == "LargeRailgun";
+}
+void SalvoRefresh()
+{
+    _salvoWeapons.Clear();
+    _salvoRailguns.Clear();
+
+    GridTerminalSystem.GetBlocksOfType(_salvoWeapons, g =>
+        g != null &&
+        !g.Closed &&
+        g.IsFunctional &&
+        g.IsSameConstructAs(Me) &&
+        !(g is IMyLargeTurretBase) &&
+        g.CustomName != null &&
+        g.CustomName.IndexOf(SALVO_TAG, StringComparison.OrdinalIgnoreCase) >= 0 &&
+        IsLargeGridRailgun(g)
+    );
+
+    _salvoWeapons.Sort((a, b) => a.CustomName.CompareTo(b.CustomName));
+
+    for (int i = 0; i < _salvoWeapons.Count; i++)
     {
-        B = b;
-        _p = p;
-        Refresh(p);
+        var g = _salvoWeapons[i];
+        if (IsLargeGridRailgun(g)) _salvoRailguns.Add(g);
     }
-    public void CycleMode()
+
+    CleanupSalvoState();
+
+    if (_salvoRailguns.Count == 0) _salvoRailIndex = 0;
+    else _salvoRailIndex %= _salvoRailguns.Count;
+}
+void CleanupSalvoState()
+{
+    var keep = new HashSet<long>();
+    for (int i = 0; i < _salvoWeapons.Count; i++)
     {
-        Mode = Mode == SalvoMode.Manual ? SalvoMode.Burst : SalvoMode.Manual;
-        ResetState();
+        var g = _salvoWeapons[i];
+        if (g != null && !g.Closed) keep.Add(g.EntityId);
     }
-    void ResetState()
+
+    var keys1 = new List<long>(_salvoRailWaitingForRechargeStart.Keys);
+    for (int i = 0; i < keys1.Count; i++)
+        if (!keep.Contains(keys1[i]))
+            _salvoRailWaitingForRechargeStart.Remove(keys1[i]);
+
+    var keys2 = new List<long>(_salvoRailLastIsShooting.Keys);
+    for (int i = 0; i < keys2.Count; i++)
+        if (!keep.Contains(keys2[i]))
+            _salvoRailLastIsShooting.Remove(keys2[i]);
+
+    var keys3 = new List<long>(_salvoRailTriggerIgnore.Keys);
+    for (int i = 0; i < keys3.Count; i++)
+        if (!keep.Contains(keys3[i]))
+            _salvoRailTriggerIgnore.Remove(keys3[i]);
+}
+void TickSalvoRailTriggerIgnore()
+{
+    if (_salvoRailTriggerIgnore.Count == 0) return;
+
+    var keys = new List<long>(_salvoRailTriggerIgnore.Keys);
+    for (int i = 0; i < keys.Count; i++)
     {
-        _burstShotsRemaining = 0;
-        _burstTimer = 0;
-        _burstPendingShot = false;
-        _ticksSinceLast = 0;
-        _ready = true;
-        if (_rg.Count == 0) return;
-        int idx = FindNextShootable(-1);
-        if (idx >= 0) _i = idx;
-        else
-        {
-            idx = FindNextFunctional(-1);
-            if (idx >= 0) _i = idx;
-        }
-        ApplyEnabledState();
+        int ticks;
+        if (!_salvoRailTriggerIgnore.TryGetValue(keys[i], out ticks)) continue;
+        ticks--;
+        if (ticks <= 0) _salvoRailTriggerIgnore.Remove(keys[i]);
+        else _salvoRailTriggerIgnore[keys[i]] = ticks;
     }
-    public void Refresh(Program p)
+}
+bool UpdateRailgunCycleAndDetectTrigger()
+{
+    int n = _salvoRailguns.Count;
+    if (n == 0) return false;
+
+    if (_salvoRailIndex < 0 || _salvoRailIndex >= n) _salvoRailIndex = 0;
+
+    if (_salvoRailguns[_salvoRailIndex] == null || _salvoRailguns[_salvoRailIndex].Closed || !_salvoRailguns[_salvoRailIndex].IsFunctional)
+        _salvoRailIndex = FindNextFunctional(_salvoRailguns, _salvoRailIndex);
+
+    if (_salvoRailIndex < 0)
+        return false;
+
+    if (!_salvoRailReady && _salvoRailTicksSinceLast >= SALVO_SINGLE_INTERVAL_TICKS)
     {
-        _rg.Clear();
-        if (B == null) return;
-        B.GetBlocksOfType<IMyUserControllableGun>(_rg, x =>
+        _salvoRailIndex = (_salvoRailIndex + 1) % n;
+        _salvoRailReady = true;
+
+        if (_salvoRailguns[_salvoRailIndex] == null || _salvoRailguns[_salvoRailIndex].Closed || !_salvoRailguns[_salvoRailIndex].IsFunctional)
+            _salvoRailIndex = FindNextFunctional(_salvoRailguns, _salvoRailIndex);
+
+        if (_salvoRailIndex < 0)
+            return false;
+    }
+
+    _salvoRailTicksSinceLast++;
+
+    var weaponToFire = _salvoRailguns[_salvoRailIndex];
+    if (weaponToFire == null || weaponToFire.Closed || !weaponToFire.IsFunctional)
+        return false;
+
+    bool lastShoot;
+    if (!_salvoRailLastIsShooting.TryGetValue(weaponToFire.EntityId, out lastShoot))
+        lastShoot = false;
+
+    bool rawNowShoot = weaponToFire.IsShooting;
+    _salvoRailLastIsShooting[weaponToFire.EntityId] = rawNowShoot;
+
+    bool ignore;
+    int ignoreTicks;
+    ignore = _salvoRailTriggerIgnore.TryGetValue(weaponToFire.EntityId, out ignoreTicks) && ignoreTicks > 0;
+
+    bool triggered = false;
+    if (!ignore && rawNowShoot && !lastShoot)
+    {
+        RegisterRailgunShot(weaponToFire, true);
+        triggered = true;
+    }
+
+    UpdateRailgunEnableStates(weaponToFire);
+    return triggered;
+}
+void UpdateRailgunEnableStates(IMyUserControllableGun weaponToFire)
+{
+    for (int i = 0; i < _salvoRailguns.Count; i++)
+    {
+        var g = _salvoRailguns[i];
+        if (g == null || g.Closed) continue;
+
+        if (g == weaponToFire)
         {
-            if (x == null || x.Closed) return false;
-            if (!p.Me.IsSameConstructAs(x)) return false;
-            return x.BlockDefinition.SubtypeId == "LargeRailgun";
-        });
-        _rg.Sort((a, b) => a.CustomName.CompareTo(b.CustomName));
-        _i = _rg.Count == 0 ? 0 : (_i % _rg.Count);
-        var keep = new HashSet<long>();
-        for (int k = 0; k < _rg.Count; k++)
-            if (_rg[k] != null && !_rg[k].Closed) keep.Add(_rg[k].EntityId);
-        if (_waitingForRechargeStart.Count > 0)
-        {
-            var keys = new List<long>(_waitingForRechargeStart.Keys);
-            for (int k = 0; k < keys.Count; k++)
-                if (!keep.Contains(keys[k])) _waitingForRechargeStart.Remove(keys[k]);
+            g.Enabled = g.IsFunctional;
+            continue;
         }
-        if (_lastIsShooting.Count > 0)
-        {
-            var keys = new List<long>(_lastIsShooting.Keys);
-            for (int k = 0; k < keys.Count; k++)
-                if (!keep.Contains(keys[k])) _lastIsShooting.Remove(keys[k]);
-        }
-        if (_ignoreShotEdge.Count > 0)
-        {
-            var keys = new List<long>(_ignoreShotEdge);
-            for (int k = 0; k < keys.Count; k++)
-                if (!keep.Contains(keys[k])) _ignoreShotEdge.Remove(keys[k]);
-        }
-        int functional = FunctionalGunCount();
-        if (_burstShotsRemaining > functional - 1)
-            _burstShotsRemaining = Math.Max(0, functional - 1);
-        if (_rg.Count == 0)
-        {
-            _i = 0;
-            _burstShotsRemaining = 0;
-            _burstTimer = 0;
-            _burstPendingShot = false;
-            _ready = true;
+
+        g.Enabled = g.IsFunctional && !CanDisableRailgun(g);
+    }
+}
+void RegisterRailgunShot(IMyUserControllableGun g, bool affectCycleTiming)
+{
+    if (g == null) return;
+
+    if (affectCycleTiming)
+    {
+        _salvoRailTicksSinceLast = 0;
+        _salvoRailReady = false;
+    }
+
+    _salvoRailWaitingForRechargeStart[g.EntityId] = true;
+}
+void MarkRailgunTriggerIgnore(IMyUserControllableGun g)
+{
+    if (g == null) return;
+    _salvoRailTriggerIgnore[g.EntityId] = SALVO_TRIGGER_IGNORE_TICKS;
+}
+bool CanDisableRailgun(IMyUserControllableGun g)
+{
+    bool recharging = IsWeaponRecharging(g);
+    bool waitingStart;
+    if (_salvoRailWaitingForRechargeStart.TryGetValue(g.EntityId, out waitingStart) && waitingStart)
+    {
+        if (recharging)
+            _salvoRailWaitingForRechargeStart[g.EntityId] = false;
+    }
+
+    bool stillWaitingStart;
+    _salvoRailWaitingForRechargeStart.TryGetValue(g.EntityId, out stillWaitingStart);
+    return !recharging && !stillWaitingStart;
+}
+bool IsWeaponRecharging(IMyUserControllableGun g)
+{
+    var sink = g.Components.Get<MyResourceSinkComponent>();
+    if (sink == null) return false;
+    return sink.CurrentInputByType(_salvoElectricityId) > (SALVO_IDLE_POWER_DRAW + SALVO_EPSILON);
+}
+int FindNextFunctional(List<IMyUserControllableGun> list, int startIdx)
+{
+    int n = list.Count;
+    for (int step = 1; step <= n; step++)
+    {
+        int idx = (startIdx + step) % n;
+        var g = list[idx];
+        if (g == null || g.Closed || !g.IsFunctional) continue;
+        return idx;
+    }
+    return -1;
+}
+void HandleSalvoTriggerFromRailgun()
+{
+    switch (_salvoMode)
+    {
+        case SalvoMode.RailgunSingle:
             return;
-        }
-        if (_i < 0 || _i >= _rg.Count || _rg[_i] == null || _rg[_i].Closed || !_rg[_i].IsFunctional)
-        {
-            int idx = FindNextShootable(-1);
-            if (idx < 0) idx = FindNextFunctional(-1);
-            _i = idx >= 0 ? idx : 0;
-        }
-        ApplyEnabledState();
-    }
-    public void Update()
-    {
-        int n = _rg.Count;
-        if (n == 0) return;
-        if (_i < 0 || _i >= n) _i = 0;
-        if (_rg[_i] == null || _rg[_i].Closed || !_rg[_i].IsFunctional)
-        {
-            int fallback = FindNextShootable(_i);
-            if (fallback < 0) fallback = FindNextFunctional(_i);
-            _i = fallback;
-        }
-        if (_i < 0) return;
-
-        for (int k = 0; k < n; k++)
-        {
-            var g = _rg[k];
-            if (g == null || g.Closed) continue;
-            bool lastShoot;
-            if (!_lastIsShooting.TryGetValue(g.EntityId, out lastShoot)) lastShoot = false;
-            bool nowShoot = g.IsShooting;
-            _lastIsShooting[g.EntityId] = nowShoot;
-            if (nowShoot && !lastShoot)
-            {
-                if (_ignoreShotEdge.Contains(g.EntityId))
-                    _ignoreShotEdge.Remove(g.EntityId);
-                else
-                    OnRailFired(g, true);
-            }
-        }
-
-        _ticksSinceLast++;
-
-        if (Mode == SalvoMode.Burst)
-            UpdateBurstMode();
-        else
-            UpdateManualMode();
-
-        ApplyEnabledState();
-    }
-    void UpdateManualMode()
-    {
-        _burstShotsRemaining = 0;
-        _burstTimer = 0;
-        _burstPendingShot = false;
-        if (!_ready && _ticksSinceLast >= ManualSpacingTicks)
-        {
-            int idx = FindNextShootable(_i);
-            if (idx >= 0)
-            {
-                _i = idx;
-                _ready = true;
-                return;
-            }
-            idx = FindNextFunctional(_i);
-            if (idx >= 0)
-            {
-                _i = idx;
-                _ready = true;
-            }
-        }
-    }
-    void UpdateBurstMode()
-    {
-        if (_burstPendingShot)
-        {
-            FireCurrentWeapon();
-            _burstPendingShot = false;
-            _burstShotsRemaining--;
+        case SalvoMode.RailgunBurst:
+            QueueSalvoBurst(SalvoMode.RailgunBurst);
             return;
-        }
-        if (_burstShotsRemaining <= 0) return;
-        _burstTimer++;
-        if (_burstTimer < BurstSpacingTicks) return;
-        int nextIdx = FindNextShootable(_i);
-        if (nextIdx < 0) nextIdx = FindNextFunctional(_i);
-        if (nextIdx < 0)
-        {
-            _burstShotsRemaining = 0;
-            _burstTimer = 0;
-            _burstPendingShot = false;
-            return;
-        }
-        _i = nextIdx;
-        _burstTimer = 0;
-        _burstPendingShot = true;
     }
-    void ApplyEnabledState()
+}
+void QueueSalvoBurst(SalvoMode mode)
+{
+    _salvoPendingBurstMode = mode;
+    _salvoBurstPending = true;
+    _salvoBurstTicks = 0;
+}
+void ProcessPendingSalvoBurst()
+{
+    if (!_salvoBurstPending) return;
+
+    _salvoBurstTicks++;
+    if (_salvoBurstTicks < SALVO_BURST_DELAY_TICKS)
+        return;
+
+    _salvoBurstPending = false;
+    _salvoBurstTicks = 0;
+
+    if (_salvoPendingBurstMode == SalvoMode.RailgunBurst)
+        FireRailgunBurst();
+}
+void FireRailgunBurst()
+{
+    for (int i = 0; i < _salvoRailguns.Count; i++)
     {
-        for (int k = 0; k < _rg.Count; k++)
-        {
-            var g = _rg[k];
-            if (g == null || g.Closed) continue;
-            if (k == _i)
-            {
-                g.Enabled = true;
-                continue;
-            }
-            g.Enabled = !CanDisable(g);
-        }
-    }
-    void FireCurrentWeapon()
-    {
-        var g = _rg[_i];
-        if (g == null || g.Closed || !g.IsFunctional) return;
+        var g = _salvoRailguns[i];
+        if (g == null || g.Closed || !g.IsFunctional) continue;
         g.Enabled = true;
-        _ignoreShotEdge.Add(g.EntityId);
         g.ShootOnce();
-        OnRailFired(g, false);
-    }
-    void OnRailFired(IMyUserControllableGun g, bool manualShot)
-    {
-        int idx = IndexOfGun(g);
-        if (idx >= 0) _i = idx;
-        _ticksSinceLast = 0;
-        _ready = false;
-        _waitingForRechargeStart[g.EntityId] = true;
-        if (!manualShot) return;
-        if (Mode == SalvoMode.Burst)
-        {
-            int maxFollowups = _p != null ? _p.GetAdaptiveBurstFollowupShots() : BURST_SHOTS_SHORT;
-            int ready = ReadyOtherGunCount(g.EntityId);
-            _burstShotsRemaining = Math.Max(0, Math.Min(ready, maxFollowups));
-            _burstTimer = 0;
-            _burstPendingShot = false;
-        }
-        else
-        {
-            _burstShotsRemaining = 0;
-            _burstTimer = 0;
-            _burstPendingShot = false;
-        }
-    }
-    int IndexOfGun(IMyUserControllableGun g)
-    {
-        if (g == null) return -1;
-        for (int k = 0; k < _rg.Count; k++)
-        {
-            var x = _rg[k];
-            if (x == null || x.Closed) continue;
-            if (x.EntityId == g.EntityId) return k;
-        }
-        return -1;
-    }
-    int FunctionalGunCount()
-    {
-        int c = 0;
-        for (int k = 0; k < _rg.Count; k++)
-        {
-            var g = _rg[k];
-            if (g != null && !g.Closed && g.IsFunctional) c++;
-        }
-        return c;
-    }
-    int ReadyOtherGunCount(long excludeEntityId)
-    {
-        int c = 0;
-        for (int k = 0; k < _rg.Count; k++)
-        {
-            var g = _rg[k];
-            if (g == null || g.Closed || !g.IsFunctional) continue;
-            if (g.EntityId == excludeEntityId) continue;
-            if (CanShootNow(g)) c++;
-        }
-        return c;
-    }
-    int FindNextFunctional(int startIdx)
-    {
-        int n = _rg.Count;
-        for (int step = 1; step <= n; step++)
-        {
-            int idx = (startIdx + step) % n;
-            var g = _rg[idx];
-            if (g == null || g.Closed || !g.IsFunctional) continue;
-            return idx;
-        }
-        return -1;
-    }
-    int FindNextShootable(int startIdx)
-    {
-        int n = _rg.Count;
-        for (int step = 1; step <= n; step++)
-        {
-            int idx = (startIdx + step) % n;
-            var g = _rg[idx];
-            if (g == null || g.Closed || !g.IsFunctional) continue;
-            if (!CanShootNow(g)) continue;
-            return idx;
-        }
-        return -1;
-    }
-    bool CanShootNow(IMyUserControllableGun g)
-    {
-        if (g == null || g.Closed || !g.IsFunctional) return false;
-        if (g.IsShooting) return false;
-        return !IsRecharging(g);
-    }
-    bool CanDisable(IMyUserControllableGun g)
-    {
-        bool recharging = IsRecharging(g);
-        bool waitingStart;
-        if (_waitingForRechargeStart.TryGetValue(g.EntityId, out waitingStart) && waitingStart)
-        {
-            if (recharging)
-                _waitingForRechargeStart[g.EntityId] = false;
-        }
-        bool stillWaitingStart;
-        _waitingForRechargeStart.TryGetValue(g.EntityId, out stillWaitingStart);
-        return !recharging && !stillWaitingStart;
-    }
-    bool IsRecharging(IMyUserControllableGun g)
-    {
-        var sink = g.Components.Get<MyResourceSinkComponent>();
-        if (sink == null) return false;
-        return sink.CurrentInputByType(E) > (IdlePowerDraw + Epsilon);
+        RegisterRailgunShot(g, false);
+        MarkRailgunTriggerIgnore(g);
     }
 }
 #endregion
